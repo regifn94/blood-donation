@@ -89,15 +89,3 @@ backend\
   Password : admin123
 
 ═══════════════════════════════════════════════════════════
-
-TIPS:
-- Gunakan text editor yang bagus (VS Code, Notepad++)
-- Jangan lupa aktivasi venv setiap kali buka CMD baru
-- Kalau ada error, baca pesan error dengan teliti
-- Cek indentasi Python harus konsisten (4 spasi)
-
-═══════════════════════════════════════════════════════════
-
-Butuh bantuan? Tanya di chat!
-
-═══════════════════════════════════════════════════════════

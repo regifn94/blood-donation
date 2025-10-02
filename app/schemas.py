@@ -125,6 +125,28 @@ class DonorDashboard(BaseModel):
     jadwal_donor_berikutnya: Optional[str] = None
     total_donasi: int
     riwayat_donasi: List[str]
+    
+class DonorScheduleCreate(BaseModel):
+    tanggal_donor: datetime
+    lokasi: str = "RS Sentra Medika Minahasa Utara"
+    catatan: Optional[str] = None
+
+class DonorScheduleResponse(BaseModel):
+    id: int
+    pendonor_id: int
+    tanggal_donor: datetime
+    lokasi: str
+    status: str
+    catatan: Optional[str]
+    created_at: datetime
+    
+    class Config:
+        orm_mode = True
+
+class DonorScheduleUpdate(BaseModel):
+    tanggal_donor: Optional[datetime]
+    status: Optional[str]
+    catatan: Optional[str]
 
 # ==================== Generic Response Schemas ====================
 

@@ -12,3 +12,7 @@
 ## Default Accounts
 - Admin: admin@hospital.com / admin123
 - Pendonor: cleymency@email.com / donor123
+
+uvicorn app.main:app --reload
+python .\run.py
+pip install -r requirements.txt

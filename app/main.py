@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 from typing import List
+from fastapi import Query
 
 from .database import get_db, init_db
 from .models import (
@@ -19,7 +20,7 @@ from .schemas import (
     DonorHistoryCreate, DonorHistoryResponse,
     BloodStockUpdate, BloodStockResponse,
     BloodRequestCreate, BloodRequestUpdate, BloodRequestResponse,
-    DashboardStats, DonorDashboard, MessageResponse
+    DashboardStats, DonorDashboard, DonorScheduleResponse, DonorStatus, DonorScheduleCreate, DonorScheduleUpdate, DonorHistoryBase, MessageResponse
 )
 from .auth import (
     get_password_hash, create_access_token, authenticate_user,
@@ -454,6 +455,359 @@ def get_all_users(
     """
     users = db.query(User).all()
     return users
+
+@app.post("/api/donor-schedules", response_model=DonorScheduleResponse, tags=["Donor Schedule"])
+def create_donor_schedule(
+    schedule: DonorScheduleCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Create a new donor schedule
+    
+    Requires authentication (pendonor or admin)
+    """
+    # Check if user is eligible to donate
+    if current_user.role == UserRole.PENDONOR:
+        # Check last donation date
+        last_donation = db.query(DonorHistory).filter(
+            DonorHistory.pendonor_id == current_user.id
+        ).order_by(DonorHistory.tanggal_donor.desc()).first()
+        
+        if last_donation:
+            min_next_date = last_donation.tanggal_donor + timedelta(days=90)
+            if schedule.tanggal_donor < min_next_date:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"You can only donate after {min_next_date.strftime('%Y-%m-%d')} (3 months from last donation)"
+                )
+    
+    # Check if date is not in the past
+    if schedule.tanggal_donor.date() < datetime.utcnow().date():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot schedule donation in the past"
+        )
+    
+    # Check if date is not on Sunday
+    if schedule.tanggal_donor.weekday() == 6:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Donation is not available on Sundays"
+        )
+    
+    # Create new donor schedule
+    new_schedule = DonorHistory(
+        pendonor_id=current_user.id,
+        tanggal_donor=schedule.tanggal_donor,
+        lokasi=schedule.lokasi,
+        status=DonorStatus.SIAP_DONOR,
+        catatan=schedule.catatan
+    )
+    
+    db.add(new_schedule)
+    db.commit()
+    db.refresh(new_schedule)
+    
+    return new_schedule
+
+@app.get("/api/donor-schedules", response_model=List[DonorScheduleResponse], tags=["Donor Schedule"])
+def get_donor_schedules(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get donor schedules
+    
+    - Admin sees all schedules
+    - Pendonor sees own schedules
+    """
+    if current_user.role == UserRole.ADMIN:
+        schedules = db.query(DonorHistory).order_by(DonorHistory.tanggal_donor.desc()).all()
+    else:
+        schedules = db.query(DonorHistory).filter(
+            DonorHistory.pendonor_id == current_user.id
+        ).order_by(DonorHistory.tanggal_donor.desc()).all()
+    
+    return schedules
+
+@app.get("/api/donor-schedules/available-dates", tags=["Donor Schedule"])
+def get_available_dates(
+    month: int =  Query(..., ge=1, le=12),
+    year: int = Query(..., ge=2024, le=2030),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get available dates for donor scheduling in a specific month
+    
+    Returns dates that are:
+    - Not in the past
+    - Not on Sundays
+    - Not fully booked (max 20 donors per day)
+    """
+    from calendar import monthrange
+    
+    available_dates = []
+    booked_dates = []
+    
+    # Get number of days in the month
+    num_days = monthrange(year, month)[1]
+    
+    # Check each day in the month
+    for day in range(1, num_days + 1):
+        date = datetime(year, month, day)
+        
+        # Skip past dates
+        if date.date() < datetime.utcnow().date():
+            continue
+        
+        # Skip Sundays
+        if date.weekday() == 6:
+            continue
+        
+        # Count existing schedules for this date
+        schedule_count = db.query(DonorHistory).filter(
+            DonorHistory.tanggal_donor >= date,
+            DonorHistory.tanggal_donor < date + timedelta(days=1)
+        ).count()
+        
+        if schedule_count >= 20:
+            booked_dates.append(day)
+        else:
+            available_dates.append({
+                "day": day,
+                "available_slots": 20 - schedule_count
+            })
+    
+    # Check user's eligibility
+    user_eligible_date = None
+    if current_user.role == UserRole.PENDONOR:
+        last_donation = db.query(DonorHistory).filter(
+            DonorHistory.pendonor_id == current_user.id
+        ).order_by(DonorHistory.tanggal_donor.desc()).first()
+        
+        if last_donation:
+            user_eligible_date = (last_donation.tanggal_donor + timedelta(days=90)).isoformat()
+    
+    return {
+        "month": month,
+        "year": year,
+        "available_dates": available_dates,
+        "booked_dates": booked_dates,
+        "user_eligible_date": user_eligible_date
+    }
+
+@app.put("/api/donor-schedules/{schedule_id}", response_model=DonorScheduleResponse, tags=["Donor Schedule"])
+def update_donor_schedule(
+    schedule_id: int,
+    schedule_update: DonorScheduleUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Update donor schedule
+    
+    - Users can update their own schedules
+    - Admins can update any schedule
+    """
+    schedule = db.query(DonorHistory).filter(
+        DonorHistory.id == schedule_id
+    ).first()
+    
+    if not schedule:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Schedule not found"
+        )
+    
+    # Check permissions
+    if current_user.role != UserRole.ADMIN and schedule.pendonor_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to update this schedule"
+        )
+    
+    # Update fields
+    if schedule_update.tanggal_donor:
+        # Validate new date
+        if schedule_update.tanggal_donor.date() < datetime.utcnow().date():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot reschedule to past date"
+            )
+        schedule.tanggal_donor = schedule_update.tanggal_donor
+    
+    if schedule_update.status:
+        schedule.status = schedule_update.status
+    
+    if schedule_update.catatan is not None:
+        schedule.catatan = schedule_update.catatan
+    
+    db.commit()
+    db.refresh(schedule)
+    
+    return schedule
+
+@app.delete("/api/donor-schedules/{schedule_id}", tags=["Donor Schedule"])
+def cancel_donor_schedule(
+    schedule_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Cancel/delete donor schedule
+    
+    - Users can cancel their own schedules
+    - Admins can cancel any schedule
+    """
+    schedule = db.query(DonorHistory).filter(
+        DonorHistory.id == schedule_id
+    ).first()
+    
+    if not schedule:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Schedule not found"
+        )
+    
+    # Check permissions
+    if current_user.role != UserRole.ADMIN and schedule.pendonor_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to cancel this schedule"
+        )
+    
+    # Check if schedule is in the future
+    if schedule.tanggal_donor.date() < datetime.utcnow().date():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot cancel past schedules"
+        )
+    
+    db.delete(schedule)
+    db.commit()
+    
+    return {"message": "Schedule cancelled successfully"}
+
+@app.get("/api/admin/donor-schedules/today", tags=["Admin"])
+def get_today_schedules(
+    current_user: User = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Get today's donor schedules
+    
+    Requires admin authentication
+    """
+    today = datetime.utcnow().date()
+    tomorrow = today + timedelta(days=1)
+    
+    schedules = db.query(DonorHistory).join(User).filter(
+        DonorHistory.tanggal_donor >= today,
+        DonorHistory.tanggal_donor < tomorrow
+    ).all()
+    
+    result = []
+    for schedule in schedules:
+        donor = db.query(User).filter(User.id == schedule.pendonor_id).first()
+        result.append({
+            "id": schedule.id,
+            "donor_name": donor.nama if donor else "Unknown",
+            "donor_blood_type": donor.gol_darah.value if donor and donor.gol_darah else "Unknown",
+            "time": schedule.tanggal_donor.strftime("%H:%M"),
+            "status": schedule.status.value if schedule.status else "Scheduled",
+            "location": schedule.lokasi,
+            "notes": schedule.catatan
+        })
+    
+    return {
+        "date": today.isoformat(),
+        "total_schedules": len(result),
+        "schedules": result
+    }
+
+# ==================== Enhanced Blood Request Endpoints ====================
+
+@app.get("/api/blood-requests/urgent", tags=["Blood Request"])
+def get_urgent_requests(
+    db: Session = Depends(get_db)
+):
+    """
+    Get urgent blood requests (public access)
+    
+    Returns pending requests sorted by urgency
+    """
+    urgent_requests = db.query(BloodRequest).filter(
+        BloodRequest.status == RequestStatus.PENDING
+    ).order_by(BloodRequest.tanggal_request.desc()).limit(10).all()
+    
+    result = []
+    for request in urgent_requests:
+        result.append({
+            "id": request.id,
+            "gol_darah": request.gol_darah.value if request.gol_darah else "Unknown",
+            "jumlah_kantong": request.jumlah_kantong,
+            "keperluan": request.keperluan,
+            "nama_pasien": request.nama_pasien[:3] + "***",  # Privacy protection
+            "tanggal_request": request.tanggal_request.isoformat(),
+            "is_urgent": True
+        })
+    
+    return result
+
+@app.post("/api/blood-requests/{request_id}/fulfill", tags=["Admin"])
+def fulfill_blood_request(
+    request_id: int,
+    notes: str = None,
+    current_user: User = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Mark blood request as fulfilled
+    
+    Requires admin authentication
+    """
+    blood_request = db.query(BloodRequest).filter(
+        BloodRequest.id == request_id
+    ).first()
+    
+    if not blood_request:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Request not found"
+        )
+    
+    # Update stock
+    stock = db.query(BloodStock).filter(
+        BloodStock.gol_darah == blood_request.gol_darah
+    ).first()
+    
+    if stock:
+        if stock.jumlah_kantong < blood_request.jumlah_kantong:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Insufficient stock. Available: {stock.jumlah_kantong}, Requested: {blood_request.jumlah_kantong}"
+            )
+        
+        stock.jumlah_kantong -= blood_request.jumlah_kantong
+        
+        # Update stock status
+        if stock.jumlah_kantong < 10:
+            stock.status = StockStatus.KRITIS
+        elif stock.jumlah_kantong < 20:
+            stock.status = StockStatus.MENIPIS
+        else:
+            stock.status = StockStatus.AMAN
+    
+    # Update request status
+    blood_request.status = RequestStatus.SELESAI
+    if notes:
+        blood_request.catatan_admin = notes
+    
+    db.commit()
+    
+    return {"message": "Request fulfilled successfully", "remaining_stock": stock.jumlah_kantong if stock else 0}
 
 # ==================== Statistics Endpoints ====================
 
