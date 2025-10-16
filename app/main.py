@@ -1,9 +1,9 @@
 """
-FastAPI Main Application
+FastAPI Main Application with AI-Powered Notifications
 Blood Donor Management System - RS Sentra Medika Minahasa Utara
 """
 
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
@@ -13,25 +13,29 @@ from fastapi import Query
 from .database import get_db, init_db
 from .models import (
     User, DonorHistory, BloodStock, BloodRequest,
-    UserRole, StockStatus, BloodType, DonorStatus
+    UserRole, StockStatus, BloodType, DonorStatus, RequestStatus
 )
 from .schemas import (
     UserCreate, UserLogin, UserResponse, Token,
     DonorHistoryCreate, DonorHistoryResponse,
     BloodStockUpdate, BloodStockResponse,
     BloodRequestCreate, BloodRequestUpdate, BloodRequestResponse,
-    DashboardStats, DonorDashboard, DonorScheduleResponse, DonorStatus, DonorScheduleCreate, DonorScheduleUpdate, DonorHistoryBase, MessageResponse
+    DashboardStats, DonorDashboard, DonorScheduleResponse,
+    DonorScheduleCreate, DonorScheduleUpdate, MessageResponse
 )
 from .auth import (
     get_password_hash, create_access_token, authenticate_user,
     get_current_user, get_current_admin
 )
+from .background_tasks import background_service
+from .ai_service import ai_service
+from .notification_service import email_service
 
 # Create FastAPI application
 app = FastAPI(
-    title="Blood Donor Management System",
-    description="API untuk sistem manajemen donor darah RS Sentra Medika",
-    version="1.0.0",
+    title="Blood Donor Management System with AI",
+    description="API untuk sistem manajemen donor darah dengan notifikasi AI",
+    version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -50,14 +54,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ==================== Startup Event ====================
+# ==================== Startup & Shutdown Events ====================
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize database on startup"""
-    print("🚀 Starting Blood Donor Management System...")
+    """Initialize database and start background tasks"""
+    print("🚀 Starting Blood Donor Management System with AI...")
     init_db()
-    print("✅ Application ready!")
+    background_service.start()
+    print("✅ Application ready with AI-powered notifications!")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean shutdown"""
+    print("⏹️ Shutting down...")
+    background_service.stop()
+    print("✅ Shutdown complete")
 
 # ==================== Root Endpoint ====================
 
@@ -65,8 +77,9 @@ async def startup_event():
 def read_root():
     """Root endpoint"""
     return {
-        "message": "Blood Donor Management System API",
-        "version": "1.0.0",
+        "message": "Blood Donor Management System API with AI",
+        "version": "2.0.0",
+        "features": ["AI-Generated Notifications", "Email Alerts", "Automated Reminders"],
         "hospital": "RS Sentra Medika Minahasa Utara",
         "docs": "/docs"
     }
@@ -78,7 +91,8 @@ def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.utcnow().isoformat(),
+        "background_tasks": "running" if background_service.is_running else "stopped"
     }
 
 # ==================== Authentication Endpoints ====================
@@ -290,7 +304,7 @@ def update_blood_stock(
     db: Session = Depends(get_db)
 ):
     """
-    Update blood stock quantity
+    Update blood stock quantity (triggers notification if low)
     
     Requires admin authentication
     """
@@ -305,7 +319,7 @@ def update_blood_stock(
             detail="Blood type not found"
         )
     
-    # Update quantity
+    old_status = stock.status
     stock.jumlah_kantong = stock_update.jumlah_kantong
     
     # Auto-update status based on quantity
@@ -320,6 +334,11 @@ def update_blood_stock(
     
     db.commit()
     db.refresh(stock)
+    
+    # Trigger notification if stock became low/critical
+    if stock.status in [StockStatus.KRITIS, StockStatus.MENIPIS] and old_status != stock.status:
+        # Background task will handle this automatically every 6 hours
+        print(f"⚠️ Stock alert will be sent for {blood_type} (status changed to {stock.status.value})")
     
     return stock
 
@@ -341,13 +360,14 @@ def get_donor_histories(
     return histories
 
 @app.post("/api/admin/donor-histories", response_model=DonorHistoryResponse, tags=["Admin"])
-def create_donor_history(
+async def create_donor_history(
     history: DonorHistoryCreate,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):
     """
-    Create donor history record
+    Create donor history record (sends thank you email automatically)
     
     Requires admin authentication
     """
@@ -355,6 +375,13 @@ def create_donor_history(
     db.add(new_history)
     db.commit()
     db.refresh(new_history)
+    
+    # Send thank you email in background
+    background_tasks.add_task(
+        background_service.send_thank_you_after_donation,
+        donor_id=history.pendonor_id,
+        db=db
+    )
     
     return new_history
 
@@ -428,6 +455,87 @@ def update_blood_request(
     
     return blood_request
 
+@app.get("/api/blood-requests/urgent", tags=["Blood Request"])
+def get_urgent_requests(db: Session = Depends(get_db)):
+    """
+    Get urgent blood requests (public access)
+    
+    Returns pending requests sorted by urgency
+    """
+    urgent_requests = db.query(BloodRequest).filter(
+        BloodRequest.status == RequestStatus.PENDING
+    ).order_by(BloodRequest.tanggal_request.desc()).limit(10).all()
+    
+    result = []
+    for request in urgent_requests:
+        result.append({
+            "id": request.id,
+            "gol_darah": request.gol_darah.value if request.gol_darah else "Unknown",
+            "jumlah_kantong": request.jumlah_kantong,
+            "keperluan": request.keperluan,
+            "nama_pasien": request.nama_pasien[:3] + "***",  # Privacy protection
+            "tanggal_request": request.tanggal_request.isoformat(),
+            "is_urgent": True
+        })
+    
+    return result
+
+@app.post("/api/blood-requests/{request_id}/fulfill", tags=["Admin"])
+def fulfill_blood_request(
+    request_id: int,
+    notes: str = None,
+    current_user: User = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Mark blood request as fulfilled and update stock
+    
+    Requires admin authentication
+    """
+    blood_request = db.query(BloodRequest).filter(
+        BloodRequest.id == request_id
+    ).first()
+    
+    if not blood_request:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Request not found"
+        )
+    
+    # Update stock
+    stock = db.query(BloodStock).filter(
+        BloodStock.gol_darah == blood_request.gol_darah
+    ).first()
+    
+    if stock:
+        if stock.jumlah_kantong < blood_request.jumlah_kantong:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Insufficient stock. Available: {stock.jumlah_kantong}, Requested: {blood_request.jumlah_kantong}"
+            )
+        
+        stock.jumlah_kantong -= blood_request.jumlah_kantong
+        
+        # Update stock status
+        if stock.jumlah_kantong < 10:
+            stock.status = StockStatus.KRITIS
+        elif stock.jumlah_kantong < 20:
+            stock.status = StockStatus.MENIPIS
+        else:
+            stock.status = StockStatus.AMAN
+    
+    # Update request status
+    blood_request.status = RequestStatus.SELESAI
+    if notes:
+        blood_request.catatan_admin = notes
+    
+    db.commit()
+    
+    return {
+        "message": "Request fulfilled successfully",
+        "remaining_stock": stock.jumlah_kantong if stock else 0
+    }
+
 # ==================== User Management Endpoints ====================
 
 @app.get("/api/admin/pendonors", response_model=List[UserResponse], tags=["Admin"])
@@ -455,6 +563,8 @@ def get_all_users(
     """
     users = db.query(User).all()
     return users
+
+# ==================== Donor Schedule Endpoints ====================
 
 @app.post("/api/donor-schedules", response_model=DonorScheduleResponse, tags=["Donor Schedule"])
 def create_donor_schedule(
@@ -533,7 +643,7 @@ def get_donor_schedules(
 
 @app.get("/api/donor-schedules/available-dates", tags=["Donor Schedule"])
 def get_available_dates(
-    month: int =  Query(..., ge=1, le=12),
+    month: int = Query(..., ge=1, le=12),
     year: int = Query(..., ge=2024, le=2030),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -727,88 +837,6 @@ def get_today_schedules(
         "schedules": result
     }
 
-# ==================== Enhanced Blood Request Endpoints ====================
-
-@app.get("/api/blood-requests/urgent", tags=["Blood Request"])
-def get_urgent_requests(
-    db: Session = Depends(get_db)
-):
-    """
-    Get urgent blood requests (public access)
-    
-    Returns pending requests sorted by urgency
-    """
-    urgent_requests = db.query(BloodRequest).filter(
-        BloodRequest.status == RequestStatus.PENDING
-    ).order_by(BloodRequest.tanggal_request.desc()).limit(10).all()
-    
-    result = []
-    for request in urgent_requests:
-        result.append({
-            "id": request.id,
-            "gol_darah": request.gol_darah.value if request.gol_darah else "Unknown",
-            "jumlah_kantong": request.jumlah_kantong,
-            "keperluan": request.keperluan,
-            "nama_pasien": request.nama_pasien[:3] + "***",  # Privacy protection
-            "tanggal_request": request.tanggal_request.isoformat(),
-            "is_urgent": True
-        })
-    
-    return result
-
-@app.post("/api/blood-requests/{request_id}/fulfill", tags=["Admin"])
-def fulfill_blood_request(
-    request_id: int,
-    notes: str = None,
-    current_user: User = Depends(get_current_admin),
-    db: Session = Depends(get_db)
-):
-    """
-    Mark blood request as fulfilled
-    
-    Requires admin authentication
-    """
-    blood_request = db.query(BloodRequest).filter(
-        BloodRequest.id == request_id
-    ).first()
-    
-    if not blood_request:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Request not found"
-        )
-    
-    # Update stock
-    stock = db.query(BloodStock).filter(
-        BloodStock.gol_darah == blood_request.gol_darah
-    ).first()
-    
-    if stock:
-        if stock.jumlah_kantong < blood_request.jumlah_kantong:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Insufficient stock. Available: {stock.jumlah_kantong}, Requested: {blood_request.jumlah_kantong}"
-            )
-        
-        stock.jumlah_kantong -= blood_request.jumlah_kantong
-        
-        # Update stock status
-        if stock.jumlah_kantong < 10:
-            stock.status = StockStatus.KRITIS
-        elif stock.jumlah_kantong < 20:
-            stock.status = StockStatus.MENIPIS
-        else:
-            stock.status = StockStatus.AMAN
-    
-    # Update request status
-    blood_request.status = RequestStatus.SELESAI
-    if notes:
-        blood_request.catatan_admin = notes
-    
-    db.commit()
-    
-    return {"message": "Request fulfilled successfully", "remaining_stock": stock.jumlah_kantong if stock else 0}
-
 # ==================== Statistics Endpoints ====================
 
 @app.get("/api/admin/statistics", tags=["Admin"])
@@ -828,9 +856,134 @@ def get_statistics(
         "total_donations": db.query(DonorHistory).count(),
         "total_requests": db.query(BloodRequest).count(),
         "pending_requests": db.query(BloodRequest).filter(
-            BloodRequest.status == "Pending"
+            BloodRequest.status == RequestStatus.PENDING
         ).count()
     }
+
+# ==================== Notification Management Endpoints ====================
+
+@app.post("/api/admin/notifications/test-email", tags=["Admin", "Notifications"])
+async def test_email_notification(
+    email: str,
+    current_user: User = Depends(get_current_admin)
+):
+    """
+    Test email notification system
+    
+    Send a test email to verify SMTP configuration
+    """
+    success = await email_service.send_email(
+        to_email=email,
+        subject="🧪 Test Email - Blood Donor System",
+        body="This is a test email from Blood Donor Management System. If you receive this, the email system is working correctly!"
+    )
+    
+    return {
+        "success": success,
+        "message": "Test email sent successfully" if success else "Failed to send test email"
+    }
+
+@app.post("/api/admin/notifications/trigger-stock-check", tags=["Admin", "Notifications"])
+async def trigger_stock_check(
+    current_user: User = Depends(get_current_admin)
+):
+    """
+    Manually trigger blood stock check and notifications
+    
+    Useful for testing or immediate alerts
+    """
+    await background_service.check_blood_stock()
+    return {"message": "Stock check triggered successfully"}
+
+@app.post("/api/admin/notifications/trigger-reminders", tags=["Admin", "Notifications"])
+async def trigger_donation_reminders(
+    current_user: User = Depends(get_current_admin)
+):
+    """
+    Manually trigger donation reminders
+    
+    Send reminders to donors with upcoming appointments
+    """
+    await background_service.send_donation_reminders()
+    return {"message": "Donation reminders triggered successfully"}
+
+@app.post("/api/admin/notifications/send-weekly-summary", tags=["Admin", "Notifications"])
+async def trigger_weekly_summary(
+    current_user: User = Depends(get_current_admin)
+):
+    """
+    Manually trigger weekly summary email to admins
+    """
+    await background_service.send_weekly_summary()
+    return {"message": "Weekly summary sent successfully"}
+
+@app.get("/api/admin/notifications/status", tags=["Admin", "Notifications"])
+def get_notification_status(
+    current_user: User = Depends(get_current_admin)
+):
+    """
+    Get notification system status
+    
+    Shows background tasks status and scheduled jobs
+    """
+    return {
+        "background_tasks_running": background_service.is_running,
+        "scheduler_jobs": [
+            {
+                "id": job.id,
+                "next_run": job.next_run_time.isoformat() if job.next_run_time else None
+            }
+            for job in background_service.scheduler.get_jobs()
+        ] if background_service.is_running else []
+    }
+
+@app.post("/api/admin/notifications/send-custom", tags=["Admin", "Notifications"])
+async def send_custom_notification(
+    email: str,
+    subject: str,
+    message: str,
+    use_ai: bool = False,
+    current_user: User = Depends(get_current_admin)
+):
+    """
+    Send custom notification to specific email
+    
+    - **email**: Recipient email
+    - **subject**: Email subject
+    - **message**: Email message (can be enhanced by AI if use_ai=True)
+    - **use_ai**: Whether to enhance message with AI
+    """
+    if use_ai:
+        # Use AI to enhance the message
+        prompt = f"""
+Buatkan email yang lebih professional dan ramah berdasarkan pesan berikut:
+
+Subject: {subject}
+Message: {message}
+
+Tambahkan greeting dan closing yang sesuai. Format dalam Bahasa Indonesia.
+"""
+        try:
+            ai_content = await ai_service.model.generate_content(prompt)
+            enhanced_message = ai_content.text
+        except:
+            enhanced_message = message
+    else:
+        enhanced_message = message
+    
+    success = await email_service.send_email(
+        to_email=email,
+        subject=subject,
+        body=enhanced_message
+    )
+    
+    return {
+        "success": success,
+        "message": "Custom notification sent" if success else "Failed to send notification",
+        "ai_enhanced": use_ai
+    }
+
+# ==================== Main ====================
 
 if __name__ == "__main__":
     import uvicorn

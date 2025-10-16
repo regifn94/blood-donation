@@ -34,6 +34,7 @@ class UserResponse(UserBase):
     
     class Config:
         from_attributes = True
+        orm_mode = True
 
 class Token(BaseModel):
     """Schema for JWT token response"""
@@ -56,10 +57,12 @@ class DonorHistoryCreate(DonorHistoryBase):
 class DonorHistoryResponse(DonorHistoryBase):
     """Schema for donor history response"""
     id: int
+    pendonor_id: int
     status: DonorStatus
     
     class Config:
         from_attributes = True
+        orm_mode = True
 
 # ==================== Blood Stock Schemas ====================
 
@@ -80,6 +83,7 @@ class BloodStockResponse(BloodStockBase):
     
     class Config:
         from_attributes = True
+        orm_mode = True
 
 # ==================== Blood Request Schemas ====================
 
@@ -109,6 +113,7 @@ class BloodRequestResponse(BloodRequestBase):
     
     class Config:
         from_attributes = True
+        orm_mode = True
 
 # ==================== Dashboard Schemas ====================
 
@@ -125,28 +130,54 @@ class DonorDashboard(BaseModel):
     jadwal_donor_berikutnya: Optional[str] = None
     total_donasi: int
     riwayat_donasi: List[str]
-    
+
+# ==================== Donor Schedule Schemas ====================
+
 class DonorScheduleCreate(BaseModel):
+    """Schema for creating donor schedule"""
     tanggal_donor: datetime
     lokasi: str = "RS Sentra Medika Minahasa Utara"
     catatan: Optional[str] = None
 
+class DonorScheduleUpdate(BaseModel):
+    """Schema for updating donor schedule"""
+    tanggal_donor: Optional[datetime] = None
+    status: Optional[DonorStatus] = None
+    catatan: Optional[str] = None
+
 class DonorScheduleResponse(BaseModel):
+    """Schema for donor schedule response"""
     id: int
     pendonor_id: int
     tanggal_donor: datetime
     lokasi: str
-    status: str
-    catatan: Optional[str]
-    created_at: datetime
+    status: DonorStatus
+    catatan: Optional[str] = None
+    
+    # Note: DonorHistory model doesn't have created_at field
+    # If you need it, add this field to the model
     
     class Config:
+        from_attributes = True
         orm_mode = True
 
-class DonorScheduleUpdate(BaseModel):
-    tanggal_donor: Optional[datetime]
-    status: Optional[str]
-    catatan: Optional[str]
+# ==================== Notification Schemas ====================
+
+class EmailTestRequest(BaseModel):
+    """Schema for testing email"""
+    email: EmailStr
+
+class CustomNotificationRequest(BaseModel):
+    """Schema for custom notification"""
+    email: EmailStr
+    subject: str = Field(..., min_length=3, max_length=200)
+    message: str = Field(..., min_length=10)
+    use_ai: bool = False
+
+class NotificationStatusResponse(BaseModel):
+    """Schema for notification system status"""
+    background_tasks_running: bool
+    scheduler_jobs: List[dict]
 
 # ==================== Generic Response Schemas ====================
 
@@ -159,3 +190,45 @@ class ErrorResponse(BaseModel):
     """Error response"""
     detail: str
     error_code: Optional[str] = None
+
+# ==================== Statistics Schemas ====================
+
+class StatisticsResponse(BaseModel):
+    """Schema for statistics response"""
+    total_users: int
+    total_pendonors: int
+    total_pemohons: int
+    total_donations: int
+    total_requests: int
+    pending_requests: int
+
+class AvailableDatesResponse(BaseModel):
+    """Schema for available dates response"""
+    month: int
+    year: int
+    available_dates: List[dict]
+    booked_dates: List[int]
+    user_eligible_date: Optional[str] = None
+
+class TodayScheduleResponse(BaseModel):
+    """Schema for today's schedules"""
+    date: str
+    total_schedules: int
+    schedules: List[dict]
+
+# ==================== Urgent Request Schemas ====================
+
+class UrgentRequestItem(BaseModel):
+    """Schema for urgent request item"""
+    id: int
+    gol_darah: str
+    jumlah_kantong: int
+    keperluan: str
+    nama_pasien: str
+    tanggal_request: str
+    is_urgent: bool
+
+class FulfillRequestResponse(BaseModel):
+    """Schema for fulfill request response"""
+    message: str
+    remaining_stock: int

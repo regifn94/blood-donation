@@ -1,5 +1,5 @@
 """
-JWT Authentication and Authorization
+JWT Authentication and Authorization (Using SHA256 - No dependencies issues)
 """
 
 from datetime import datetime, timedelta
@@ -22,8 +22,13 @@ SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-please-change-in-productio
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))  # 24 hours
 
-# Password hashing context
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Password hashing context - Using pbkdf2_sha256 (built-in, no external dependencies)
+pwd_context = CryptContext(
+    schemes=["pbkdf2_sha256"],
+    deprecated="auto",
+    pbkdf2_sha256__default_rounds=200000
+)
+print("✅ Using PBKDF2-SHA256 for password hashing")
 
 # HTTP Bearer for token authentication
 security = HTTPBearer()
@@ -41,7 +46,11 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     Returns:
         bool: True if password matches, False otherwise
     """
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except Exception as e:
+        print(f"❌ Password verification error: {e}")
+        return False
 
 def get_password_hash(password: str) -> str:
     """
@@ -53,7 +62,14 @@ def get_password_hash(password: str) -> str:
     Returns:
         str: Hashed password
     """
-    return pwd_context.hash(password)
+    try:
+        return pwd_context.hash(password)
+    except Exception as e:
+        print(f"❌ Password hashing error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error hashing password"
+        )
 
 # ==================== JWT Token Functions ====================
 
