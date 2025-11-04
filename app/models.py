@@ -75,6 +75,16 @@ class BloodStock(Base):
     jumlah_kantong = Column(Integer, default=0)
     status = Column(Enum(StockStatus), nullable=False)
     terakhir_update = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    def update_status(self):
+        """Update status berdasarkan threshold (<=5 = KRITIS)"""
+        if self.jumlah_kantong <= 5:
+            self.status = StockStatus.KRITIS  # AUTO ALERT!
+        elif self.jumlah_kantong <= 10:
+            self.status = StockStatus.MENIPIS
+        else:
+            self.status = StockStatus.AMAN
+        self.terakhir_update = datetime.utcnow()
 
 class BloodRequest(Base):
     __tablename__ = "blood_requests"

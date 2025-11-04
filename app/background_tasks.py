@@ -1,10 +1,12 @@
 """
 Background Tasks for Automated Notifications
 Uses APScheduler for periodic checks
+Enhanced with CRITICAL stock alert every 1 minute
 """
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from typing import List
@@ -22,13 +24,22 @@ class BackgroundTaskService:
     def __init__(self):
         self.scheduler = AsyncIOScheduler()
         self.is_running = False
+        self.last_critical_stocks = set()  # Track which stocks were critical
     
     def start(self):
         """Start the background scheduler"""
         if self.is_running:
             return
         
-        # Check blood stock every 6 hours
+        # 🚨 NEW: Check CRITICAL blood stock every 1 minute (< 5 bags)
+        self.scheduler.add_job(
+            self.check_critical_blood_stock,
+            IntervalTrigger(minutes=1),  # Every 1 minute
+            id='check_critical_blood_stock',
+            replace_existing=True
+        )
+        
+        # Check blood stock every 6 hours (general check for low stocks 5-10 bags)
         self.scheduler.add_job(
             self.check_blood_stock,
             CronTrigger(hour='*/6'),  # Every 6 hours
@@ -55,6 +66,7 @@ class BackgroundTaskService:
         self.scheduler.start()
         self.is_running = True
         print("✅ Background task scheduler started")
+        print("🚨 CRITICAL stock alert: Running every 1 minute for stocks < 5 bags")
     
     def stop(self):
         """Stop the background scheduler"""
@@ -63,15 +75,128 @@ class BackgroundTaskService:
             self.is_running = False
             print("⏹️ Background task scheduler stopped")
     
-    async def check_blood_stock(self):
+    async def check_critical_blood_stock(self):
         """
-        Check blood stock levels and send alerts for low/critical stock
+        🚨 CRITICAL ALERT: Check blood stock < 5 bags every 1 minute
+        Sends immediate email notification to all admins
         """
-        print("🔍 Checking blood stock levels...")
+        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f"\n{'='*60}")
+        print(f"🚨 [{current_time}] CRITICAL STOCK CHECK - Running every 1 minute")
+        print(f"{'='*60}")
         
         db = SessionLocal()
         try:
-            # Get all blood stocks that are low or critical
+            # Get all blood stocks with < 5 bags (CRITICAL)
+            critical_stocks = db.query(BloodStock).filter(
+                BloodStock.jumlah_kantong < 5
+            ).all()
+            
+            if not critical_stocks:
+                print("✅ No critical stock detected (all stocks >= 5 bags)")
+                print(f"{'='*60}\n")
+                # Clear tracking if no critical stocks
+                self.last_critical_stocks.clear()
+                return
+            
+            # Get admin emails
+            admins = db.query(User).filter(User.role == UserRole.ADMIN).all()
+            admin_emails = [admin.email for admin in admins if admin.email]
+            
+            if not admin_emails:
+                print("⚠️ No admin emails found for notification")
+                print(f"{'='*60}\n")
+                return
+            
+            print(f"📧 Admin emails found: {', '.join(admin_emails)}")
+            print(f"\n🚨 CRITICAL STOCKS DETECTED ({len(critical_stocks)} types):")
+            print(f"{'-'*60}")
+            
+            # Track current critical stocks
+            current_critical = set()
+            
+            # Send alert for each critical stock
+            for stock in critical_stocks:
+                blood_type_key = stock.gol_darah.value
+                current_critical.add(blood_type_key)
+                
+                # Console debug info
+                print(f"🩸 Blood Type: {stock.gol_darah.value}")
+                print(f"   📦 Current Stock: {stock.jumlah_kantong} bags")
+                print(f"   ⚠️  Status: {stock.status.value}")
+                print(f"   🕐 Last Update: {stock.terakhir_update}")
+                
+                # Check if this is a new critical stock or ongoing
+                is_new = blood_type_key not in self.last_critical_stocks
+                alert_type = "🆕 NEW CRITICAL ALERT" if is_new else "⚠️  ONGOING CRITICAL"
+                
+                print(f"   🔔 Alert Type: {alert_type}")
+                
+                # Generate AI content
+                try:
+                    ai_content = await ai_service.generate_low_stock_alert(
+                        blood_type=stock.gol_darah.value,
+                        current_stock=stock.jumlah_kantong,
+                        status="KRITIS"
+                    )
+                    print(f"   ✅ AI content generated")
+                except Exception as ai_error:
+                    print(f"   ⚠️  AI generation failed: {ai_error}")
+                    ai_content = {
+                        "subject": f"🚨 CRITICAL: Stok Darah {stock.gol_darah.value} < 5 Kantong!",
+                        "body": f"Stok darah {stock.gol_darah.value} KRITIS: {stock.jumlah_kantong} kantong"
+                    }
+                
+                # Enhance subject with critical indicator
+                ai_content["subject"] = f"🚨 CRITICAL ({stock.jumlah_kantong} bags): {ai_content['subject']}"
+                
+                # Send email to all admins
+                try:
+                    success = await email_service.send_low_stock_alert(
+                        admin_emails=admin_emails,
+                        blood_type=stock.gol_darah.value,
+                        current_stock=stock.jumlah_kantong,
+                        status="KRITIS",
+                        ai_content=ai_content
+                    )
+                    
+                    if success:
+                        print(f"   ✅ Critical alert email SENT to {len(admin_emails)} admin(s)")
+                    else:
+                        print(f"   ❌ Failed to send critical alert email")
+                except Exception as email_error:
+                    print(f"   ❌ Email error: {email_error}")
+                
+                print(f"{'-'*60}")
+                
+                # Small delay between emails
+                await asyncio.sleep(0.5)
+            
+            # Update tracking
+            self.last_critical_stocks = current_critical
+            
+            print(f"\n📊 Summary:")
+            print(f"   Total Critical Stocks: {len(critical_stocks)}")
+            print(f"   Admin Notified: {len(admin_emails)}")
+            print(f"   Next Check: In 1 minute")
+            print(f"{'='*60}\n")
+        
+        except Exception as e:
+            print(f"❌ Error in critical stock check: {str(e)}")
+            print(f"{'='*60}\n")
+        finally:
+            db.close()
+    
+    async def check_blood_stock(self):
+        """
+        Check blood stock levels and send alerts for low/critical stock
+        This runs every 6 hours for general monitoring (5-10 bags)
+        """
+        print("🔍 Checking blood stock levels (6-hour check)...")
+        
+        db = SessionLocal()
+        try:
+            # Get all blood stocks that are low or critical (5-10 bags)
             low_stocks = db.query(BloodStock).filter(
                 BloodStock.status.in_([StockStatus.MENIPIS, StockStatus.KRITIS])
             ).all()
