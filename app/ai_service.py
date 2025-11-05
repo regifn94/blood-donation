@@ -1,6 +1,6 @@
 """
-AI Service - Google Gemini Integration
-Generates email content for notifications
+ai_service.py
+Google Gemini AI Integration for Email Content Generation
 """
 
 import os
@@ -98,6 +98,7 @@ BODY: [tulis isi email]
     ) -> dict:
         """
         Generate email reminder for upcoming donation
+        Enhanced with H-1 urgency detection
         
         Args:
             donor_name: Name of the donor
@@ -109,8 +110,13 @@ BODY: [tulis isi email]
         Returns:
             dict: Email subject and body
         """
+        # Add urgency context for H-1 reminders
+        urgency_note = ""
+        if days_until == 1:
+            urgency_note = "\nINI ADALAH PENGINGAT H-1 (BESOK)! Gunakan tone yang lebih urgent dan personal."
+        
         prompt = f"""
-Buatkan email pengingat donor darah untuk pendonor yang akan mendonor dalam {days_until} hari.
+Buatkan email pengingat donor darah untuk pendonor yang akan mendonor dalam {days_until} hari.{urgency_note}
 
 Detail:
 - Nama Pendonor: {donor_name}
@@ -119,11 +125,11 @@ Detail:
 - Lokasi: {location}
 
 Email harus:
-1. Ramah dan menghargai kontribusi pendonor
+1. {"SANGAT urgent, personal, dan mengingatkan BESOK adalah hari H" if days_until == 1 else "Ramah dan menghargai kontribusi pendonor"}
 2. Dalam Bahasa Indonesia
-3. Menyertakan tips persiapan sebelum donor
+3. Menyertakan {"checklist persiapan malam ini dan besok pagi" if days_until == 1 else "tips persiapan sebelum donor"}
 4. Informasi kontak jika perlu reschedule
-5. Motivasi tentang pentingnya donor darah
+5. {"Reminder: bawa KTP, makan bergizi malam ini, tidur cukup" if days_until == 1 else "Motivasi tentang pentingnya donor darah"}
 6. Maksimal 250 kata
 
 Format output:
@@ -149,7 +155,7 @@ BODY: [tulis isi email]
             
             # Fallback if parsing fails
             if not subject or not body:
-                subject = f"🩸 Pengingat: Jadwal Donor Darah - {donation_date}"
+                subject = f"{'🔔 BESOK! ' if days_until == 1 else ''}🩸 Pengingat: Jadwal Donor Darah - {donation_date}"
                 body = content
             
             return {
@@ -269,10 +275,60 @@ RS Sentra Medika Minahasa Utara
         location: str,
         days_until: int
     ) -> dict:
-        """Fallback template for donation reminder"""
-        return {
-            "subject": f"🩸 Pengingat: Jadwal Donor Darah {days_until} Hari Lagi",
-            "body": f"""
+        """Fallback template for donation reminder with H-1 urgency"""
+        
+        if days_until == 1:
+            # H-1 URGENT TEMPLATE
+            return {
+                "subject": f"🔔 BESOK! Pengingat Donor Darah Anda - {donation_date}",
+                "body": f"""
+Halo {donor_name},
+
+🚨 PENGINGAT PENTING: Donor darah Anda dijadwalkan BESOK!
+
+Detail Jadwal:
+📅 Tanggal: {donation_date} (BESOK!)
+📍 Lokasi: {location}
+🩸 Golongan Darah: {blood_type}
+⏰ Waktu: 08:00 - 14:00 WIB
+
+✅ CHECKLIST PERSIAPAN MALAM INI:
+□ Makan malam bergizi (sayur, protein, karbohidrat)
+□ Minum air putih minimal 2 liter
+□ Tidur cukup (minimal 6-7 jam)
+□ Hindari makanan berlemak tinggi
+□ Siapkan KTP/identitas
+
+✅ CHECKLIST BESOK PAGI:
+□ Sarapan bergizi (wajib!)
+□ Minum air putih 2-3 gelas
+□ Bawa KTP/identitas
+□ Kenakan pakaian nyaman
+□ Datang tepat waktu
+
+❗ PENTING:
+• Jika kondisi tidak fit/sakit, SEGERA hubungi kami
+• Jika berhalangan, reschedule minimal H-1
+• Jangan lupa sarapan - ini WAJIB sebelum donor!
+
+💪 Kontribusi Anda = Nyawa Terselamatkan
+Satu kantong darah = hingga 3 nyawa!
+
+Terima kasih atas komitmen Anda sebagai pahlawan tanpa tanda jasa.
+
+Salam sehat,
+Tim RS Sentra Medika Minahasa Utara
+📞 Kontak Darurat: (0431) 123456
+📧 Email: donor@rssentralmedika.id
+
+PS: Kami tunggu BESOK ya! 🩸❤️
+"""
+            }
+        else:
+            # REGULAR H-3 TEMPLATE
+            return {
+                "subject": f"🩸 Pengingat: Jadwal Donor Darah {days_until} Hari Lagi",
+                "body": f"""
 Halo {donor_name},
 
 Terima kasih telah mendaftar sebagai pendonor darah di RS Sentra Medika!
@@ -298,7 +354,7 @@ Salam sehat,
 Tim RS Sentra Medika Minahasa Utara
 📞 Kontak: (0431) 123456
 """
-        }
+            }
     
     def _fallback_thank_you_template(
         self,

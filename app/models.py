@@ -1,4 +1,8 @@
-# TODO: Copy code from artifact 
+"""
+models.py
+Database Models for Blood Donation Management System
+"""
+
 from sqlalchemy import Column, Integer, String, DateTime, Enum, ForeignKey, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
@@ -63,6 +67,12 @@ class DonorHistory(Base):
     lokasi = Column(String(200), default="RS Sentra Medika Minahasa Utara")
     status = Column(Enum(DonorStatus), default=DonorStatus.MASA_TUNGGU)
     catatan = Column(Text, nullable=True)
+    # 🆕 NEW: Track reminder status
+    # 0 = no reminder sent
+    # 1 = H-3 reminder sent
+    # 2 = H-1 reminder sent
+    # 3 = both H-3 and H-1 sent
+    reminder_sent = Column(Integer, default=0)
     
     # Relationships
     pendonor = relationship("User", back_populates="donor_histories")
@@ -77,9 +87,9 @@ class BloodStock(Base):
     terakhir_update = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     def update_status(self):
-        """Update status berdasarkan threshold (<=5 = KRITIS)"""
+        """Update status berdasarkan jumlah kantong"""
         if self.jumlah_kantong <= 5:
-            self.status = StockStatus.KRITIS  # AUTO ALERT!
+            self.status = StockStatus.KRITIS
         elif self.jumlah_kantong <= 10:
             self.status = StockStatus.MENIPIS
         else:

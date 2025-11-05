@@ -1,7 +1,7 @@
 """
+background_tasks.py
 Background Tasks for Automated Notifications
-Uses APScheduler for periodic checks
-Enhanced with CRITICAL stock alert every 1 minute
+Uses APScheduler for periodic checks with H-1 reminder feature
 """
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -13,7 +13,7 @@ from typing import List
 import asyncio
 
 from .database import SessionLocal
-from .models import User, BloodStock, DonorHistory, UserRole, StockStatus
+from .models import User, BloodStock, DonorHistory, UserRole, StockStatus, DonorStatus
 from .ai_service import ai_service
 from .notification_service import email_service
 
@@ -34,7 +34,7 @@ class BackgroundTaskService:
         # 🚨 NEW: Check CRITICAL blood stock every 1 minute (< 5 bags)
         self.scheduler.add_job(
             self.check_critical_blood_stock,
-            IntervalTrigger(minutes=1),  # Every 1 minute
+            IntervalTrigger(minutes=10),  # Every 1 minute
             id='check_critical_blood_stock',
             replace_existing=True
         )
@@ -47,12 +47,18 @@ class BackgroundTaskService:
             replace_existing=True
         )
         
-        # Send donation reminders daily at 9 AM
+        # 🔔 Send donation reminders daily at 9 AM (H-3 and H-1)
         self.scheduler.add_job(
             self.send_donation_reminders,
             CronTrigger(hour=9, minute=0),  # Daily at 9:00 AM
             id='donation_reminders',
             replace_existing=True
+            
+            # just testing for every 1 minute
+            # self.send_donation_reminders,
+            # IntervalTrigger(minutes=1),  # Every 1 minute
+            # id='donation_reminders',
+            # replace_existing=True
         )
         
         # Check weekly summary every Monday at 8 AM
@@ -67,6 +73,7 @@ class BackgroundTaskService:
         self.is_running = True
         print("✅ Background task scheduler started")
         print("🚨 CRITICAL stock alert: Running every 1 minute for stocks < 5 bags")
+        print("🔔 Donation reminders: Daily at 9:00 AM (H-3 and H-1)")
     
     def stop(self):
         """Stop the background scheduler"""
@@ -248,40 +255,56 @@ class BackgroundTaskService:
     
     async def send_donation_reminders(self):
         """
-        Send reminders to donors with upcoming appointments
+        🔔 Send reminders to donors with upcoming appointments
         Sends reminders 3 days before and 1 day before donation
+        Enhanced with reminder tracking to prevent duplicate sends
         """
-        print("📧 Sending donation reminders...")
+        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f"\n{'='*60}")
+        print(f"📧 [{current_time}] DONATION REMINDER CHECK - Running daily at 9 AM")
+        print(f"{'='*60}")
         
         db = SessionLocal()
         try:
             today = datetime.utcnow().date()
             
             # Check for donations in 3 days and 1 day
-            reminder_dates = [
-                today + timedelta(days=3),
-                today + timedelta(days=1)
+            reminder_configs = [
+                {"days": 3, "flag": 1, "label": "H-3"},
+                {"days": 1, "flag": 2, "label": "H-1"}  # 🔔 H-1 REMINDER
             ]
             
-            for reminder_date in reminder_dates:
-                days_until = (reminder_date - today).days
+            total_sent = 0
+            
+            for config in reminder_configs:
+                days_until = config["days"]
+                reminder_flag = config["flag"]
+                label = config["label"]
                 
-                # Get scheduled donations for this date
+                reminder_date = today + timedelta(days=days_until)
+                
+                # Get scheduled donations for this date that haven't received this reminder yet
                 schedules = db.query(DonorHistory).join(User).filter(
                     DonorHistory.tanggal_donor >= datetime.combine(reminder_date, datetime.min.time()),
-                    DonorHistory.tanggal_donor < datetime.combine(reminder_date + timedelta(days=1), datetime.min.time())
+                    DonorHistory.tanggal_donor < datetime.combine(reminder_date + timedelta(days=1), datetime.min.time()),
+                    DonorHistory.status == DonorStatus.SIAP_DONOR,  # Only send to confirmed donors
+                    # Check if this specific reminder hasn't been sent (using bitwise check)
+                    ~DonorHistory.reminder_sent.op('&')(reminder_flag).cast(Integer).is_(reminder_flag)
                 ).all()
                 
                 if not schedules:
+                    print(f"✅ No {label} reminders needed for {reminder_date}")
                     continue
                 
-                print(f"📅 Found {len(schedules)} donations scheduled in {days_until} days")
+                print(f"\n📅 {label} REMINDERS: Found {len(schedules)} donations on {reminder_date}")
+                print(f"{'-'*60}")
                 
                 for schedule in schedules:
                     # Get donor information
                     donor = db.query(User).filter(User.id == schedule.pendonor_id).first()
                     
                     if not donor or not donor.email:
+                        print(f"⚠️  Skipped: No email for donor ID {schedule.pendonor_id}")
                         continue
                     
                     # Format date in Indonesian
@@ -293,33 +316,75 @@ class BackgroundTaskService:
                     
                     donation_date = schedule.tanggal_donor
                     formatted_date = f"{donation_date.day} {months_id[donation_date.month]} {donation_date.year}"
+                    formatted_time = donation_date.strftime("%H:%M")
                     
-                    # Generate AI content
-                    ai_content = await ai_service.generate_donation_reminder(
-                        donor_name=donor.nama,
-                        blood_type=donor.gol_darah.value if donor.gol_darah else "Unknown",
-                        donation_date=formatted_date,
-                        location=schedule.lokasi,
-                        days_until=days_until
-                    )
+                    print(f"\n🩸 Donor: {donor.nama}")
+                    print(f"   📧 Email: {donor.email}")
+                    print(f"   📅 Date: {formatted_date} {formatted_time}")
+                    print(f"   🏥 Location: {schedule.lokasi}")
+                    print(f"   ⏰ Reminder: {label} ({days_until} days)")
+                    
+                    # Generate AI content with specific H-1 emphasis if needed
+                    try:
+                        ai_content = await ai_service.generate_donation_reminder(
+                            donor_name=donor.nama,
+                            blood_type=donor.gol_darah.value if donor.gol_darah else "Unknown",
+                            donation_date=formatted_date,
+                            location=schedule.lokasi,
+                            days_until=days_until
+                        )
+                        
+                        # Add urgency for H-1 reminders
+                        if days_until == 1:
+                            ai_content["subject"] = f"🔔 BESOK! {ai_content['subject']}"
+                        
+                        print(f"   ✅ AI content generated")
+                    except Exception as ai_error:
+                        print(f"   ⚠️  AI generation failed: {ai_error}")
+                        # Fallback content
+                        if days_until == 1:
+                            ai_content = {
+                                "subject": f"🔔 BESOK: Pengingat Donor Darah - {formatted_date}",
+                                "body": f"Halo {donor.nama},\n\nIni pengingat bahwa Anda memiliki jadwal donor darah BESOK:\n📅 {formatted_date}\n📍 {schedule.lokasi}\n\nJangan lupa!"
+                            }
+                        else:
+                            ai_content = {
+                                "subject": f"📅 Pengingat Donor Darah - {formatted_date}",
+                                "body": f"Halo {donor.nama},\n\nAnda memiliki jadwal donor darah dalam {days_until} hari:\n📅 {formatted_date}\n📍 {schedule.lokasi}"
+                            }
                     
                     # Send reminder
-                    success = await email_service.send_donation_reminder(
-                        donor_email=donor.email,
-                        donor_name=donor.nama,
-                        ai_content=ai_content
-                    )
-                    
-                    if success:
-                        print(f"✅ Reminder sent to {donor.nama} ({donor.email})")
-                    else:
-                        print(f"❌ Failed to send reminder to {donor.email}")
+                    try:
+                        success = await email_service.send_donation_reminder(
+                            donor_email=donor.email,
+                            donor_name=donor.nama,
+                            ai_content=ai_content
+                        )
+                        
+                        if success:
+                            # Update reminder_sent flag using bitwise OR
+                            schedule.reminder_sent = schedule.reminder_sent | reminder_flag
+                            db.commit()
+                            print(f"   ✅ {label} reminder sent successfully")
+                            total_sent += 1
+                        else:
+                            print(f"   ❌ Failed to send reminder")
+                    except Exception as email_error:
+                        print(f"   ❌ Email error: {email_error}")
                     
                     # Delay between emails
                     await asyncio.sleep(1)
+                
+                print(f"{'-'*60}")
+            
+            print(f"\n📊 Summary:")
+            print(f"   Total Reminders Sent: {total_sent}")
+            print(f"   Next Check: Tomorrow at 9:00 AM")
+            print(f"{'='*60}\n")
         
         except Exception as e:
             print(f"❌ Error sending donation reminders: {str(e)}")
+            print(f"{'='*60}\n")
         finally:
             db.close()
     
@@ -445,6 +510,110 @@ Sistem Manajemen Donor Darah
         
         except Exception as e:
             print(f"❌ Error sending thank you email: {str(e)}")
+    
+    async def send_immediate_h1_reminder(
+        self,
+        donor_id: int = None
+    ):
+        """
+        🔔 MANUAL TRIGGER: Send H-1 reminder immediately
+        Can be called from API endpoint or admin panel
+        
+        Args:
+            donor_id: Optional specific donor ID, if None sends to all tomorrow's donors
+        """
+        print(f"\n{'='*60}")
+        print(f"🔔 MANUAL H-1 REMINDER TRIGGER")
+        print(f"{'='*60}")
+        
+        db = SessionLocal()
+        try:
+            tomorrow = datetime.utcnow().date() + timedelta(days=1)
+            
+            # Query for tomorrow's donations
+            query = db.query(DonorHistory).join(User).filter(
+                DonorHistory.tanggal_donor >= datetime.combine(tomorrow, datetime.min.time()),
+                DonorHistory.tanggal_donor < datetime.combine(tomorrow + timedelta(days=1), datetime.min.time()),
+                DonorHistory.status == DonorStatus.SIAP_DONOR
+            )
+            
+            # Filter by specific donor if provided
+            if donor_id:
+                query = query.filter(DonorHistory.pendonor_id == donor_id)
+            
+            schedules = query.all()
+            
+            if not schedules:
+                print("✅ No donations scheduled for tomorrow")
+                print(f"{'='*60}\n")
+                return {"sent": 0, "failed": 0, "message": "No donations tomorrow"}
+            
+            print(f"📧 Sending H-1 reminders to {len(schedules)} donor(s)")
+            
+            sent = 0
+            failed = 0
+            
+            for schedule in schedules:
+                donor = db.query(User).filter(User.id == schedule.pendonor_id).first()
+                
+                if not donor or not donor.email:
+                    failed += 1
+                    continue
+                
+                # Format date
+                months_id = {
+                    1: "Januari", 2: "Februari", 3: "Maret", 4: "April",
+                    5: "Mei", 6: "Juni", 7: "Juli", 8: "Agustus",
+                    9: "September", 10: "Oktober", 11: "November", 12: "Desember"
+                }
+                
+                donation_date = schedule.tanggal_donor
+                formatted_date = f"{donation_date.day} {months_id[donation_date.month]} {donation_date.year}"
+                
+                # Generate urgent H-1 content
+                ai_content = await ai_service.generate_donation_reminder(
+                    donor_name=donor.nama,
+                    blood_type=donor.gol_darah.value if donor.gol_darah else "Unknown",
+                    donation_date=formatted_date,
+                    location=schedule.lokasi,
+                    days_until=1
+                )
+                
+                ai_content["subject"] = f"🔔 BESOK! {ai_content['subject']}"
+                
+                # Send
+                success = await email_service.send_donation_reminder(
+                    donor_email=donor.email,
+                    donor_name=donor.nama,
+                    ai_content=ai_content
+                )
+                
+                if success:
+                    # Mark as sent
+                    schedule.reminder_sent = schedule.reminder_sent | 2  # Set H-1 flag
+                    db.commit()
+                    sent += 1
+                    print(f"✅ Sent to {donor.nama}")
+                else:
+                    failed += 1
+                    print(f"❌ Failed: {donor.nama}")
+                
+                await asyncio.sleep(0.5)
+            
+            print(f"\n📊 Summary: {sent} sent, {failed} failed")
+            print(f"{'='*60}\n")
+            
+            return {
+                "sent": sent,
+                "failed": failed,
+                "message": f"H-1 reminders sent to {sent} donor(s)"
+            }
+        
+        except Exception as e:
+            print(f"❌ Error: {str(e)}")
+            return {"sent": 0, "failed": 0, "error": str(e)}
+        finally:
+            db.close()
 
 # Create singleton instance
 background_service = BackgroundTaskService()

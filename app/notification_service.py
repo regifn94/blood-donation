@@ -1,6 +1,6 @@
 """
-Email Notification Service (Fixed SMTP Connection)
-Handles sending email notifications using SMTP
+notification_service.py
+Email Notification Service using SMTP
 """
 
 import os
