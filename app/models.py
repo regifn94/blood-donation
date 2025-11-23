@@ -1,13 +1,15 @@
 # TODO: Copy code from artifact 
-from sqlalchemy import Column, Integer, String, DateTime, Enum, ForeignKey, Text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship
-from datetime import datetime
-import enum
+from sqlalchemy import Column, Integer, String, DateTime, Enum, ForeignKey, Text # import tipe data kolom dari SQLALchemy
+from sqlalchemy.ext.declarative import declarative_base # untuk membuat base class model
+from sqlalchemy.orm import relationship #untuk membuat relasi antara tabel
+from datetime import datetime # untuk mencatat waktu (timestamp)
+import enum #untuk membuat enumerasi (pilihan tetap seperti role atau status)
 
+# membaut base class untuk semua model SQLALchemy
 Base = declarative_base()
 
-class UserRole(str, enum.Enum):
+# ENUMERSASI / PILIHAN TETAP
+class UserRole(str, enum.Enum): #  untuk menentukan peran pengguna
     ADMIN = "admin"
     PENDONOR = "pendonor"
     PEMOHON = "pemohon"
@@ -38,7 +40,7 @@ class RequestStatus(str, enum.Enum):
     SELESAI = "Selesai"
 
 class User(Base):
-    __tablename__ = "users"
+    __tablename__ = "users" 
     
     id = Column(Integer, primary_key=True, index=True)
     nama = Column(String(100), nullable=False)
@@ -49,12 +51,14 @@ class User(Base):
     no_telepon = Column(String(20), nullable=True)
     alamat = Column(Text, nullable=True)
     tanggal_daftar = Column(DateTime, default=datetime.utcnow)
+    gender = Column(String(10), nullable=True)
     
-    # Relationships
+    # Relationships to others tables
     donor_histories = relationship("DonorHistory", back_populates="pendonor")
     blood_requests = relationship("BloodRequest", back_populates="pemohon")
 
-class DonorHistory(Base):
+# TABEL RIWAYAT DONOR
+class DonorHistory(Base): # model untuk tabel
     __tablename__ = "donor_histories"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -63,8 +67,8 @@ class DonorHistory(Base):
     lokasi = Column(String(200), default="RS Sentra Medika Minahasa Utara")
     status = Column(Enum(DonorStatus), default=DonorStatus.MASA_TUNGGU)
     catatan = Column(Text, nullable=True)
-    
-    # Relationships
+    reminder_sent = Column(Integer, default=0)
+    # Relationships to user table
     pendonor = relationship("User", back_populates="donor_histories")
 
 class BloodStock(Base):
@@ -76,10 +80,10 @@ class BloodStock(Base):
     status = Column(Enum(StockStatus), nullable=False)
     terakhir_update = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    def update_status(self):
+    def update_status(self): # method untuk memperbarui status stok darah
         """Update status berdasarkan threshold (<=5 = KRITIS)"""
         if self.jumlah_kantong <= 5:
-            self.status = StockStatus.KRITIS  # AUTO ALERT!
+            self.status = StockStatus.KRITIS  # AUTO ALERT! jika kurang dari 5
         elif self.jumlah_kantong <= 10:
             self.status = StockStatus.MENIPIS
         else:
@@ -98,6 +102,7 @@ class BloodRequest(Base):
     tanggal_request = Column(DateTime, default=datetime.utcnow)
     status = Column(Enum(RequestStatus), default=RequestStatus.PENDING)
     catatan_admin = Column(Text, nullable=True)
+    nomor_pemohon = Column(String(20), nullable=True)
     
     # Relationships
     pemohon = relationship("User", back_populates="blood_requests")

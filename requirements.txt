@@ -1,30 +1,46 @@
+# ============================
 # FastAPI and Web Framework
+# ============================
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 python-multipart==0.0.6
 
+# ============================
 # Database
+# ============================
 sqlalchemy==2.0.23
 pymysql==1.1.0
-cryptography==41.0.7
+cryptography==45.0.7
 
-# Authentication
+# ============================
+# Authentication & Security
+# ============================
 python-jose[cryptography]==3.3.0
-passlib==1.7.4
+passlib[bcrypt]==1.7.4  # tambahkan [bcrypt] biar aman untuk hashing password
 
-# Data Validation
+# ============================
+# Data Validation & Settings
+# ============================
 pydantic==2.5.0
 pydantic-settings==2.1.0
 email-validator==2.1.0
 
-# Environment
-python-dotenv==1.0.0
+# ============================
+# Environment Variables
+# ============================
+python-dotenv==1.0.1  # versi terbaru, lebih stabil
 
+# ============================
 # AI Integration
+# ============================
 google-generativeai==0.3.2
 
-# Email
-aiosmtplib==3.0.1
+# ============================
+# Email (SendGrid)
+# ============================
+sendgrid==6.12.5
 
-# Background Tasks
+# ============================
+# Background Tasks & Scheduling
+# ============================
 APScheduler==3.10.4

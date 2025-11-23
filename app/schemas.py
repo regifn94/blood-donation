@@ -1,22 +1,24 @@
 """
 Pydantic Schemas for Request/Response Validation
-"""
+""" # Deskripsi file: berisi schema Pydantic untuk validasi request & response API
 
-from pydantic import BaseModel, EmailStr, Field
-from datetime import datetime
-from typing import Optional, List
-from .models import UserRole, BloodType, DonorStatus, StockStatus, RequestStatus
+
+from pydantic import BaseModel, EmailStr, Field # import kelas dan tipe data dari pydantic
+from datetime import datetime # untuk tipe data tanggal dan waktu
+from typing import Optional, List # untuk tipe data opsional dan list
+from .models import UserRole, BloodType, DonorStatus, StockStatus, RequestStatus # import enum dari models.py
 
 # ==================== User Schemas ====================
 
 class UserBase(BaseModel):
     """Base user schema"""
-    email: EmailStr
+    email: EmailStr # validasi email dengan format email yang benar
     nama: str = Field(..., min_length=3, max_length=100)
-    role: UserRole
+    role: UserRole # peran user
     gol_darah: Optional[BloodType] = None
     no_telepon: Optional[str] = Field(None, max_length=20)
     alamat: Optional[str] = None
+    gender: Optional [str]
 
 class UserCreate(UserBase):
     """Schema for user creation"""
@@ -92,7 +94,8 @@ class BloodRequestBase(BaseModel):
     nama_pasien: str = Field(..., min_length=3, max_length=100)
     gol_darah: BloodType
     jumlah_kantong: int = Field(..., ge=1, le=10)
-    keperluan: str = Field(..., min_length=10)
+    nomor_pemohon: Optional [str] = None
+    keperluan: str = Field(..., min_length=1)
 
 class BloodRequestCreate(BloodRequestBase):
     """Schema for creating blood request"""
@@ -110,6 +113,7 @@ class BloodRequestResponse(BloodRequestBase):
     tanggal_request: datetime
     status: RequestStatus
     catatan_admin: Optional[str] = None
+    nomor_pemohon: Optional[str] = None
     
     class Config:
         from_attributes = True

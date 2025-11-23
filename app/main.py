@@ -2,6 +2,8 @@
 FastAPI Main Application with AI-Powered Notifications
 Blood Donor Management System - RS Sentra Medika Minahasa Utara
 """
+from dotenv import load_dotenv
+load_dotenv()
 
 from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,7 +44,7 @@ app = FastAPI(
 
 # CORS Configuration
 app.add_middleware(
-    CORSMiddleware,
+    CORSMiddleware, # untuk mengizinkan komunikasi antara frontend
     allow_origins=[
         "http://localhost:3000",
         "http://localhost:5173",
@@ -132,7 +134,8 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
         role=user.role,
         gol_darah=user.gol_darah,
         no_telepon=user.no_telepon,
-        alamat=user.alamat
+        alamat=user.alamat,
+        gender=user.gender
     )
     
     db.add(new_user)
@@ -168,7 +171,7 @@ def login(user_login: UserLogin, db: Session = Depends(get_db)):
     }
 
 @app.get("/api/me", response_model=UserResponse, tags=["Authentication"])
-def get_me(current_user: User = Depends(get_current_user)):
+def get_me(current_user: User = Depends(get_current_user)): # Untuk mengambil data user yang sedang login dari JWT token, dan memastikan request memiliki token valid.
     """Get current authenticated user"""
     return current_user
 
@@ -176,7 +179,7 @@ def get_me(current_user: User = Depends(get_current_user)):
 
 @app.get("/api/admin/dashboard", response_model=DashboardStats, tags=["Admin"])
 def get_admin_dashboard(
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(get_current_admin), #hanya admin yang bisa akses
     db: Session = Depends(get_db)
 ):
     """
@@ -420,19 +423,103 @@ def create_blood_request(
     
     return new_request
 
+async def send_approval_notification(
+    pemohon_email: str,
+    pemohon_name: str,
+    blood_type: str,
+    jumlah_kantong: int,
+    keperluan: str,
+    catatan_admin: str = None
+):
+    """
+    Background task to send approval email notification
+    Called by BackgroundTasks when request is approved
+    """
+    try:
+        print(f"🔄 Generating approval email for {pemohon_name}...")
+        
+        # Generate AI content
+        ai_content = await ai_service.generate_request_approved_email(
+            pemohon_name=pemohon_name,
+            blood_type=blood_type,
+            jumlah_kantong=jumlah_kantong,
+            keperluan=keperluan,
+            catatan_admin=catatan_admin
+        )
+        
+        # Send email
+        success = await email_service.send_request_approved_email(
+            pemohon_email=pemohon_email,
+            pemohon_name=pemohon_name,
+            ai_content=ai_content
+        )
+        
+        if success:
+            print(f"✅ Approval email sent to {pemohon_name} ({pemohon_email})")
+        else:
+            print(f"❌ Failed to send approval email to {pemohon_email}")
+    
+    except Exception as e:
+        print(f"❌ Error sending approval notification: {str(e)}")
+
+
+async def send_rejection_notification(
+    pemohon_email: str,
+    pemohon_name: str,
+    blood_type: str,
+    jumlah_kantong: int,
+    keperluan: str,
+    catatan_admin: str = None
+):
+    """
+    Background task to send rejection email notification
+    Called by BackgroundTasks when request is rejected
+    """
+    try:
+        print(f"🔄 Generating rejection email for {pemohon_name}...")
+        
+        # Generate AI content
+        ai_content = await ai_service.generate_request_rejected_email(
+            pemohon_name=pemohon_name,
+            blood_type=blood_type,
+            jumlah_kantong=jumlah_kantong,
+            keperluan=keperluan,
+            catatan_admin=catatan_admin
+        )
+        
+        # Send email
+        success = await email_service.send_request_rejected_email(
+            pemohon_email=pemohon_email,
+            pemohon_name=pemohon_name,
+            ai_content=ai_content
+        )
+        
+        if success:
+            print(f"✅ Rejection email sent to {pemohon_name} ({pemohon_email})")
+        else:
+            print(f"❌ Failed to send rejection email to {pemohon_email}")
+    
+    except Exception as e:
+        print(f"❌ Error sending rejection notification: {str(e)}")
+
 @app.put(
     "/api/admin/blood-requests/{request_id}",
     response_model=BloodRequestResponse,
     tags=["Admin"]
 )
-def update_blood_request(
+async def update_blood_request(
     request_id: int,
     request_update: BloodRequestUpdate,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):
     """
-    Update blood request status
+    Update blood request status with automatic email notification
+    
+    Sends email to requester when:
+    - Status changed to DISETUJUI (Approved)
+    - Status changed to DITOLAK (Rejected)
     
     Requires admin authentication
     """
@@ -446,12 +533,50 @@ def update_blood_request(
             detail="Request not found"
         )
     
+    # Store old status to detect changes
+    old_status = blood_request.status
+    
+    # Update status and notes
     blood_request.status = request_update.status
     if request_update.catatan_admin:
         blood_request.catatan_admin = request_update.catatan_admin
     
+    # Commit changes first
     db.commit()
     db.refresh(blood_request)
+    
+    # Get requester information
+    pemohon = db.query(User).filter(User.id == blood_request.pemohon_id).first()
+    
+    # Send email notification if status changed to APPROVED or REJECTED
+    if pemohon and pemohon.email:
+        status_changed = old_status != request_update.status
+        
+        if status_changed and request_update.status == RequestStatus.DISETUJUI:
+            # Send APPROVAL email
+            print(f"📧 Sending approval email to {pemohon.email}...")
+            background_tasks.add_task(
+                send_approval_notification,
+                pemohon_email=pemohon.email,
+                pemohon_name=pemohon.nama,
+                blood_type=blood_request.gol_darah.value,
+                jumlah_kantong=blood_request.jumlah_kantong,
+                keperluan=blood_request.keperluan,
+                catatan_admin=blood_request.catatan_admin
+            )
+        
+        elif status_changed and request_update.status == RequestStatus.DITOLAK:
+            # Send REJECTION email
+            print(f"📧 Sending rejection email to {pemohon.email}...")
+            background_tasks.add_task(
+                send_rejection_notification,
+                pemohon_email=pemohon.email,
+                pemohon_name=pemohon.nama,
+                blood_type=blood_request.gol_darah.value,
+                jumlah_kantong=blood_request.jumlah_kantong,
+                keperluan=blood_request.keperluan,
+                catatan_admin=blood_request.catatan_admin
+            )
     
     return blood_request
 
@@ -567,7 +692,7 @@ def get_all_users(
 # ==================== Donor Schedule Endpoints ====================
 
 @app.post("/api/donor-schedules", response_model=DonorScheduleResponse, tags=["Donor Schedule"])
-def create_donor_schedule(
+async def create_donor_schedule(
     schedule: DonorScheduleCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -575,38 +700,57 @@ def create_donor_schedule(
     """
     Create a new donor schedule
     
-    Requires authentication (pendonor or admin)
+    - Pendonor dapat membuat jadwal donor baru.
+    - Jika jadwal terakhir SELESAI → harus menunggu 3 bulan.
+    - Jika jadwal terakhir BATAL → bisa langsung buat lagi.
+    - Tidak boleh buat jadwal di hari Minggu atau tanggal lampau.
     """
-    # Check if user is eligible to donate
     if current_user.role == UserRole.PENDONOR:
-        # Check last donation date
         last_donation = db.query(DonorHistory).filter(
             DonorHistory.pendonor_id == current_user.id
         ).order_by(DonorHistory.tanggal_donor.desc()).first()
         
         if last_donation:
-            min_next_date = last_donation.tanggal_donor + timedelta(days=90)
-            if schedule.tanggal_donor < min_next_date:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"You can only donate after {min_next_date.strftime('%Y-%m-%d')} (3 months from last donation)"
-                )
-    
-    # Check if date is not in the past
+            # Jika terakhir donor SELESAI → wajib tunggu 3 bulan
+            if last_donation.status == DonorStatus.SELESAI:
+                min_next_date = last_donation.tanggal_donor + timedelta(days=90)
+                if schedule.tanggal_donor < min_next_date:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"You can only donate after {min_next_date.strftime('%Y-%m-%d')} (3 months from last donation)"
+                    )
+            
+            if last_donation.status in [DonorStatus.SIAP_DONOR, DonorStatus.MASA_TUNGGU]:
+                min_next_date = last_donation.tanggal_donor + timedelta(days=90)
+                if schedule.tanggal_donor < min_next_date:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            f"Your last donation is still active. "
+                            f"You can schedule your next donation only after your previous donation is marked as 'Completed'. "
+                            f"The earliest available date is {min_next_date.strftime('%Y-%m-%d')}."
+                        )
+                    )
+     
+            # Jika terakhir donor BATAL → langsung bisa buat baru
+            elif last_donation.status == DonorStatus.BATAL:
+                pass
+
+    # Tidak boleh buat jadwal di masa lalu
     if schedule.tanggal_donor.date() < datetime.utcnow().date():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot schedule donation in the past"
         )
-    
-    # Check if date is not on Sunday
+
+    # Tidak boleh buat jadwal hari Minggu
     if schedule.tanggal_donor.weekday() == 6:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Donation is not available on Sundays"
         )
-    
-    # Create new donor schedule
+
+    # Buat jadwal baru
     new_schedule = DonorHistory(
         pendonor_id=current_user.id,
         tanggal_donor=schedule.tanggal_donor,
@@ -618,6 +762,36 @@ def create_donor_schedule(
     db.add(new_schedule)
     db.commit()
     db.refresh(new_schedule)
+    
+    # ============ SEND CONFIRMATION EMAIL ============
+    
+    try:
+        # Format date in Indonesian
+        months_id = {
+            1: "Januari", 2: "Februari", 3: "Maret", 4: "April",
+            5: "Mei", 6: "Juni", 7: "Juli", 8: "Agustus",
+            9: "September", 10: "Oktober", 11: "November", 12: "Desember"
+        }
+        
+        donation_date = schedule.tanggal_donor
+        formatted_date = f"{donation_date.day} {months_id[donation_date.month]} {donation_date.year}"
+        formatted_time = donation_date.strftime("%H:%M WIB")
+        full_formatted_date = f"{formatted_date} pukul {formatted_time}"
+        
+        # Generate AI content for email
+        ai_content = await ai_service.generate_schedule_confirmation(
+            donor_name=current_user.nama,
+            blood_type=current_user.gol_darah.value if current_user.gol_darah else "Unknown",
+            donation_date=full_formatted_date,
+            location=schedule.lokasi,
+            notes=schedule.catatan
+        )
+            
+    except Exception as email_error:
+        # Log error but don't fail the schedule creation
+        print(f"⚠️  Failed to send confirmation email: {str(email_error)}")
+        import traceback
+        traceback.print_exc()
     
     return new_schedule
 
