@@ -27,6 +27,7 @@ class BloodType(str, enum.Enum):
 class DonorStatus(str, enum.Enum):
     SIAP_DONOR = "Siap Donor"
     MASA_TUNGGU = "Masa Tunggu"
+    SELESAI = "Selesai"
 
 class StockStatus(str, enum.Enum):
     AMAN = "Aman"

@@ -700,62 +700,78 @@ async def create_donor_schedule(
     """
     Create a new donor schedule
     
-    - Pendonor dapat membuat jadwal donor baru.
+    - Pendonor dapat membuat jadwal donor baru (termasuk masa lalu).
+    - Jika tanggal di masa lalu, otomatis status = SELESAI.
     - Jika jadwal terakhir SELESAI → harus menunggu 3 bulan.
     - Jika jadwal terakhir BATAL → bisa langsung buat lagi.
-    - Tidak boleh buat jadwal di hari Minggu atau tanggal lampau.
+    - Tidak boleh buat jadwal di hari Minggu.
     """
+    from datetime import datetime, timezone
+    
+    # Cek apakah tanggal di masa lalu
+    now = datetime.now(timezone.utc)
+
+    # Convert tanggal_donor menjadi timezone-aware
+    if schedule.tanggal_donor.tzinfo is None:
+        schedule_dt = schedule.tanggal_donor.replace(tzinfo=timezone.utc)
+    else:
+        schedule_dt = schedule.tanggal_donor
+
+    is_past_date = schedule_dt < now
+    
+    # Validasi: tidak boleh hari Minggu untuk jadwal masa depan
+    if not is_past_date and schedule.tanggal_donor.weekday() == 6:  # Sunday = 6
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Tidak dapat membuat jadwal donor pada hari Minggu"
+        )
+    
     if current_user.role == UserRole.PENDONOR:
-        last_donation = db.query(DonorHistory).filter(
-            DonorHistory.pendonor_id == current_user.id
+        # Ambil riwayat donor terakhir yang SELESAI
+        last_completed_donation = db.query(DonorHistory).filter(
+            DonorHistory.pendonor_id == current_user.id,
+            DonorHistory.status == DonorStatus.SELESAI
         ).order_by(DonorHistory.tanggal_donor.desc()).first()
         
-        if last_donation:
-            # Jika terakhir donor SELESAI → wajib tunggu 3 bulan
-            if last_donation.status == DonorStatus.SELESAI:
-                min_next_date = last_donation.tanggal_donor + timedelta(days=90)
-                if schedule.tanggal_donor < min_next_date:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"You can only donate after {min_next_date.strftime('%Y-%m-%d')} (3 months from last donation)"
-                    )
+        if last_completed_donation:
+            # Validasi jarak 3 bulan dari donor terakhir yang SELESAI
+            min_next_date = last_completed_donation.tanggal_donor + timedelta(days=90)
             
-            if last_donation.status in [DonorStatus.SIAP_DONOR, DonorStatus.MASA_TUNGGU]:
-                min_next_date = last_donation.tanggal_donor + timedelta(days=90)
-                if schedule.tanggal_donor < min_next_date:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=(
-                            f"Your last donation is still active. "
-                            f"You can schedule your next donation only after your previous donation is marked as 'Completed'. "
-                            f"The earliest available date is {min_next_date.strftime('%Y-%m-%d')}."
-                        )
-                    )
-     
-            # Jika terakhir donor BATAL → langsung bisa buat baru
-            elif last_donation.status == DonorStatus.BATAL:
-                pass
+            # Untuk jadwal masa depan, cek jarak 3 bulan
+            if not is_past_date and schedule.tanggal_donor < min_next_date:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Anda baru dapat donor setelah {min_next_date.strftime('%d-%m-%Y')} (3 bulan dari donor terakhir)"
+                )
+            
+            # Untuk jadwal masa lalu, cek apakah minimal 3 bulan dari donor sebelumnya
+            if is_past_date and schedule.tanggal_donor < min_next_date:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Tanggal donor yang Anda masukkan terlalu dekat dengan donor terakhir. Minimal 3 bulan dari {last_completed_donation.tanggal_donor.strftime('%d-%m-%Y')}"
+                )
+        
+        # Cek apakah ada jadwal aktif (SIAP_DONOR)
+        active_schedule = db.query(DonorHistory).filter(
+            DonorHistory.pendonor_id == current_user.id,
+            DonorHistory.status == DonorStatus.SIAP_DONOR
+        ).first()
+        
+        if active_schedule:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Anda masih memiliki jadwal donor aktif. Silakan selesaikan atau batalkan jadwal tersebut terlebih dahulu."
+            )
 
-    # Tidak boleh buat jadwal di masa lalu
-    if schedule.tanggal_donor.date() < datetime.utcnow().date():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot schedule donation in the past"
-        )
-
-    # Tidak boleh buat jadwal hari Minggu
-    if schedule.tanggal_donor.weekday() == 6:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Donation is not available on Sundays"
-        )
-
+    # Tentukan status berdasarkan tanggal
+    initial_status = DonorStatus.SELESAI if is_past_date else DonorStatus.SIAP_DONOR
+    
     # Buat jadwal baru
     new_schedule = DonorHistory(
         pendonor_id=current_user.id,
         tanggal_donor=schedule.tanggal_donor,
         lokasi=schedule.lokasi,
-        status=DonorStatus.SIAP_DONOR,
+        status=initial_status,
         catatan=schedule.catatan
     )
     
@@ -763,37 +779,70 @@ async def create_donor_schedule(
     db.commit()
     db.refresh(new_schedule)
     
-    # ============ SEND CONFIRMATION EMAIL ============
-    
-    try:
-        # Format date in Indonesian
-        months_id = {
-            1: "Januari", 2: "Februari", 3: "Maret", 4: "April",
-            5: "Mei", 6: "Juni", 7: "Juli", 8: "Agustus",
-            9: "September", 10: "Oktober", 11: "November", 12: "Desember"
-        }
-        
-        donation_date = schedule.tanggal_donor
-        formatted_date = f"{donation_date.day} {months_id[donation_date.month]} {donation_date.year}"
-        formatted_time = donation_date.strftime("%H:%M WIB")
-        full_formatted_date = f"{formatted_date} pukul {formatted_time}"
-        
-        # Generate AI content for email
-        ai_content = await ai_service.generate_schedule_confirmation(
-            donor_name=current_user.nama,
-            blood_type=current_user.gol_darah.value if current_user.gol_darah else "Unknown",
-            donation_date=full_formatted_date,
-            location=schedule.lokasi,
-            notes=schedule.catatan
-        )
+    # ============ SEND CONFIRMATION EMAIL (hanya untuk jadwal masa depan) ============
+    if not is_past_date:
+        try:
+            # Format date in Indonesian
+            months_id = {
+                1: "Januari", 2: "Februari", 3: "Maret", 4: "April",
+                5: "Mei", 6: "Juni", 7: "Juli", 8: "Agustus",
+                9: "September", 10: "Oktober", 11: "November", 12: "Desember"
+            }
             
-    except Exception as email_error:
-        # Log error but don't fail the schedule creation
-        print(f"⚠️  Failed to send confirmation email: {str(email_error)}")
-        import traceback
-        traceback.print_exc()
+            donation_date = schedule.tanggal_donor
+            formatted_date = f"{donation_date.day} {months_id[donation_date.month]} {donation_date.year}"
+            formatted_time = donation_date.strftime("%H:%M WIB")
+            full_formatted_date = f"{formatted_date} pukul {formatted_time}"
+            
+            # Generate AI content for email
+            ai_content = await ai_service.generate_schedule_confirmation(
+                donor_name=current_user.nama,
+                blood_type=current_user.gol_darah.value if current_user.gol_darah else "Unknown",
+                donation_date=full_formatted_date,
+                location=schedule.lokasi,
+                notes=schedule.catatan
+            )
+                
+        except Exception as email_error:
+            # Log error but don't fail the schedule creation
+            print(f"⚠️  Failed to send confirmation email: {str(email_error)}")
+            import traceback
+            traceback.print_exc()
     
     return new_schedule
+
+
+# ============ TAMBAHAN: Background Task untuk Auto-Update Status ============
+@app.get("/api/donor-schedules/update-expired", tags=["Donor Schedule"])
+async def update_expired_schedules(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+    ):
+    """
+    Update jadwal yang sudah lewat dari SIAP_DONOR menjadi SELESAI
+    Endpoint ini bisa dipanggil secara manual atau dijadwalkan (cron job)
+    """
+    from datetime import datetime, timezone
+    
+    now = datetime.now(timezone.utc)
+    
+    # Cari semua jadwal SIAP_DONOR yang sudah lewat
+    expired_schedules = db.query(DonorHistory).filter(
+        DonorHistory.status == DonorStatus.SIAP_DONOR,
+        DonorHistory.tanggal_donor < now
+    ).all()
+    
+    updated_count = 0
+    for schedule in expired_schedules:
+        schedule.status = DonorStatus.SELESAI
+        updated_count += 1
+    
+    db.commit()
+    
+    return {
+        "message": f"Successfully updated {updated_count} expired schedules to SELESAI",
+        "updated_count": updated_count
+    }
 
 @app.get("/api/donor-schedules", response_model=List[DonorScheduleResponse], tags=["Donor Schedule"])
 def get_donor_schedules(

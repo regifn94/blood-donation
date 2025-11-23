@@ -42,7 +42,7 @@ class BackgroundTaskService:
             
             self.scheduler.add_job(
                 self.send_donation_reminders_testing,
-                IntervalTrigger(minutes=1),  # Every 10 minute for testing
+                IntervalTrigger(minutes=10),  # Every 10 minute for testing
                 id='donation_reminders_testing',
                 replace_existing=True
             )
@@ -58,7 +58,7 @@ class BackgroundTaskService:
         # 🚨 Check CRITICAL blood stock every 1 minutes (< 5 bags)
         self.scheduler.add_job(
             self.check_critical_blood_stock,
-            IntervalTrigger(minutes=1),
+            IntervalTrigger(minutes=10),
             id='check_critical_blood_stock',
             replace_existing=True
         )
